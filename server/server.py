@@ -2,11 +2,10 @@ import datetime
 import requests
 import os
 from io import BytesIO
-
 import pytz
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, send_file, request
-
+from waitress import serve
 from weather import WeatherClient
 
 IMAGE_SIZE = (600, 448)
@@ -18,6 +17,7 @@ app = Flask(__name__)
 fonts = {}
 icons = {}
 
+PORT = int(os.environ.get('PORT', 80))
 
 @app.route("/")
 def index():
@@ -25,6 +25,7 @@ def index():
     api_key = request.args.get("api_key")
     if not api_key:
         return '{"error": "no_api_key"}'
+
     # Render
     composer = ImageComposer(
         api_key,
@@ -45,17 +46,20 @@ class ImageComposer:
         self.api_key = api_key
         self.lat = lat
         self.long = long
-        self.timezone = pytz.timezone(timezone)
 
     def render(self):
         # Fetch weather
         weather = WeatherClient(self.lat, self.long)
         weather.load(self.api_key)
+        self.timezone = pytz.timezone(weather.get_timezone())
+        
         # Work out time
         now = datetime.datetime.now(self.timezone)
+
         # Create image
         self.image = Image.new("P", IMAGE_SIZE, 0)
         self.image.putpalette(PALETTE)
+        
         # Draw on date
         self.draw = ImageDraw.ImageDraw(self.image)
         left = 20
@@ -87,6 +91,7 @@ class ImageComposer:
         self.draw_text(
             pos=(left, 75), text=now.strftime("%B"), colour=BLACK, font=("bold", 30),
         )
+        
         # Draw on weather header
         self.draw_text(
             pos=(470, 10),
@@ -96,7 +101,7 @@ class ImageComposer:
             align="right",
         )
         self.draw_text(
-            pos=(470, 20), text="°C", colour=BLACK, font=("regular", 28), align="left",
+            pos=(470, 20), text="°F", colour=BLACK, font=("regular", 28), align="left",
         )
         temp_min, temp_max = weather.temp_range_24hr()
         self.draw_text(
@@ -113,48 +118,81 @@ class ImageComposer:
             font=("regular", 40),
             align="centre",
         )
+        
         # Draw immediate weather
         for (time_offset, left) in [(0, 30), (2600 * 2, 150), (3600 * 6, 270)]:
-            top = 130
+            top = 125
             summary = weather.hourly_summary(time_offset)
             self.draw_weather_column(summary, top, left)
+        
         # Draw tomorrow
         left = 450
         summary = weather.daily_summary(1)
         self.draw_weather_column(summary, top, left)
+        
         # Draw on data footer
         left = 20
         top = 390
+        
+        #sunrise
         self.draw_icon("sunrise", (left, top), (50, 50))
         left += 50
         self.draw_text(
             pos=(left + 5, top + 10),
-            text=weather.sunrise().astimezone(self.timezone).strftime("%H:%M"),
+            text=weather.sunrise().astimezone(self.timezone).strftime("%H:%M").lstrip("0"),
             colour=BLACK,
             font=("bold", 30),
         )
+        
+        #sunset
         left = 180
         self.draw_icon("sunset", (left, top), (50, 50))
         left += 50
         self.draw_text(
             pos=(left + 5, top + 10),
-            text=weather.sunset().astimezone(self.timezone).strftime("%H:%M"),
+            text=weather.sunset().astimezone(self.timezone).strftime("%H:%M").lstrip("0"),
             colour=BLACK,
             font=("bold", 30),
         )
+
+        #uv-index
+        left = 350
+        self.draw_icon("uv-index", (left, top), (50, 50))
+        left += 50
+
+        self.draw_text(
+            pos=(left + 5, top + 10),
+            text=int(weather.uvi_current()),
+            colour=BLACK,
+            font=("bold", 30),
+        )
+
+        #humidity
+        left = 460
+        self.draw_icon("humidity", (left, top), (50, 50))
+        left += 50
+
+        self.draw_text(
+            pos=(left + 5, top + 10),
+            text=weather.humidity_current(),
+            colour=BLACK,
+            font=("bold", 30),
+        )
+
         # Done!
         return self.image
 
     def draw_weather_column(self, summary, top, left):
         # Weather icon
-        self.draw_icon(summary["icon"], (left, top + 40), (100, 100))
+        self.draw_icon(summary["icon"], (left, top + 35), (100, 100))
+        
         # Date/time heading
         if "date" in summary:
-            time_text = summary["date"].astimezone(self.timezone).strftime("%A").title()
+            time_text = summary["date"].astimezone(self.timezone).strftime("%A").lstrip("0").title()
+            
         else:
-            time_text = (
-                summary["time"].astimezone(self.timezone).strftime("%-I%p").lower()
-            )
+            time_text = summary["time"].astimezone(self.timezone).strftime("%I%p").lstrip("0").lower()
+            
         self.draw_text(
             pos=(left + 50, top),
             text=time_text,
@@ -165,21 +203,21 @@ class ImageComposer:
         # Temperature
         if "temperature_range" in summary:
             self.draw_text(
-                pos=(left + 20, top + 150),
+                pos=(left + 20, top + 140),
                 text=round(summary["temperature_range"][1]),
                 colour=RED,
                 font=("regular", 30),
                 align="centre",
             )
             self.draw_text(
-                pos=(left + 50, top + 150),
+                pos=(left + 50, top + 140),
                 text="/",
                 colour=BLACK,
                 font=("regular", 30),
                 align="centre",
             )
             self.draw_text(
-                pos=(left + 80, top + 150),
+                pos=(left + 80, top + 140),
                 text=round(summary["temperature_range"][0]),
                 colour=BLACK,
                 font=("regular", 30),
@@ -188,19 +226,19 @@ class ImageComposer:
         else:
             temp_width = (
                 self.size_text(round(summary["temperature"]), ("regular", 30))[0]
-                + self.size_text("°C", ("regular", 20))[0]
+                + self.size_text("°F", ("regular", 20))[0]
                 + 3
             )
             self.draw_text(
-                pos=(left + 50 - (temp_width / 2), top + 150),
+                pos=(left + 50 - (temp_width / 2), top + 140),
                 text=round(summary["temperature"]),
                 colour=RED,
                 font=("regular", 30),
                 align="left",
             )
             self.draw_text(
-                pos=(left + 50 + (temp_width / 2), top + 160),
-                text="°C",
+                pos=(left + 50 + (temp_width / 2), top + 150),
+                text="°F",
                 colour=BLACK,
                 font=("regular", 20),
                 align="right",
@@ -208,19 +246,40 @@ class ImageComposer:
         # Wind
         wind_width = (
             self.size_text(round(summary["wind"]), ("regular", 30))[0]
-            + self.size_text("mph", ("regular", 20))[0]
+            + self.size_text("mph", ("regular", 16))[0]
             + 3
         )
         self.draw_text(
-            pos=(left + 50 - (wind_width / 2), top + 190),
+            pos=(left + 50 - (wind_width / 2), top + 180),
             text=round(summary["wind"]),
             colour=BLACK,
             font=("regular", 30),
             align="left",
         )
         self.draw_text(
-            pos=(left + 50 + (wind_width / 2), top + 200),
+            pos=(left + 50 + (wind_width / 2), top + 190),
             text="mph",
+            colour=BLACK,
+            font=("regular", 16),
+            align="right",
+        )
+
+        # Percipitation
+        percip_width = (
+            self.size_text(round(summary["percip"]*100), ("regular", 30))[0]
+            + self.size_text("%", ("regular", 20))[0]
+            + 3
+        )
+        self.draw_text(
+            pos=(left + 50 - (percip_width / 2), top + 220),
+            text=round(summary["percip"]*100),
+            colour=BLACK,
+            font=("regular", 30),
+            align="left",
+        )
+        self.draw_text(
+            pos=(left + 50 + (percip_width / 2), top + 230),
+            text="%",
             colour=BLACK,
             font=("regular", 20),
             align="right",

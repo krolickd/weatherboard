@@ -11,9 +11,16 @@ class WeatherClient:
 
     def load(self, api_key):
         self.data = requests.get(
-            f"https://api.openweathermap.org/data/2.5/onecall?lat={self.latitude}&lon={self.longitude}&exclude=minutely&units=metric&appid={api_key}"
+            f"https://api.openweathermap.org/data/2.5/onecall?lat={self.latitude}&lon={self.longitude}&exclude=minutely&units=imperial&appid={api_key}"
         ).json()
         self.current_time = self.data["current"]["dt"]
+        self.timezone = self.data["timezone"]
+
+    def get_timezone(self):
+        return self.timezone
+
+    def uvi_current(self):
+        return self.data["current"]["uvi"]
 
     def temp_current(self):
         return self.data["current"]["temp"]
@@ -46,13 +53,20 @@ class WeatherClient:
             if d1["dt"] < target < d2["dt"]:
                 break
         data = d1
+
+        if self.is_daytime(data["dt"]):
+            version = "day"
+        else:
+            version = "night"
+
         # Format a summary
         return {
             "time": datetime.utcfromtimestamp(data["dt"]).replace(tzinfo=pytz.utc),
-            "icon": self.code_to_icon(data["weather"][0]["id"]),
+            "icon": self.code_to_icon(data["weather"][0]["id"],version),
             "description": data["weather"][0]["main"].title(),
             "temperature": data["temp"],
-            "wind": data["wind_speed"] * 2.2,
+            "wind": data["wind_speed"],
+            "percip": data["pop"],
         }
 
     def daily_summary(self, day_offset):
@@ -60,13 +74,21 @@ class WeatherClient:
         # Format a summary
         return {
             "date": datetime.utcfromtimestamp(data["dt"]).replace(tzinfo=pytz.utc),
-            "icon": self.code_to_icon(data["weather"][0]["id"]),
+            "icon": self.code_to_icon(data["weather"][0]["id"],"day"),
             "description": data["weather"][0]["main"].title(),
             "temperature_range": (data["temp"]["min"], data["temp"]["max"]),
-            "wind": data["wind_speed"] * 2.2,
+            "wind": data["wind_speed"],
+            "percip": data["pop"],
         }
 
-    def code_to_icon(self, code):
+    def is_daytime(self, timestamp):
+        sunrise = self.data["current"]["sunrise"]
+        sunset = self.data["current"]["sunset"]
+
+        return timestamp >= sunrise and timestamp <= sunset
+
+
+    def code_to_icon(self, code, version):
         if code == 511:
             return "snow"
         elif code == 771:
@@ -86,9 +108,9 @@ class WeatherClient:
         elif 700 <= code < 800:
             return "fog"
         elif code == 800:
-            return "clear-day"
+            return "clear-" + version
         elif code == 801:
-            return "clouds-few-day"
+            return "clouds-few-" + version
         elif code == 802:
             return "clouds-scattered"
         else:
